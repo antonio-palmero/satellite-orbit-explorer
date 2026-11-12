@@ -1,0 +1,22 @@
+Satellite Orbit Report - built during Space Career Week 2026, GNSS Academy
+
+CelesTrak GP data (OMM JSON), 4 satellites, retrieved (UTC) 2026-11-10T16:30:32Z
+Window (UTC): 2026-11-10 00:00:00 -> 2026-11-11 00:00:00, step 5 s, 17281 points
+Model: two-body Kepler orbit from SGP4 mean elements, spherical Earth, simple Greenwich rotation - an educational approximation.
+
+Orbit summary
+Name                       NORAD Period [h] Perigee [km]  Apogee [km]         e  i [deg]   v min   v max
+--------------------------------------------------------------------------------------------------------
+PULSAR-0                   64541      1.578        500.0        505.6 0.0004075   97.484   7.608   7.614
+GSAT0225 (GALILEO 29)      59598     14.078      23217.4      23226.8 0.0001590   55.219   3.669   3.670
+SES-5                      38652     23.935      35778.1      35794.2 0.0001910    0.051   3.074   3.075
+QZS-2 (MICHIBIKI-2)        42738     23.940      32649.6      38934.8 0.0745209   39.250   2.853   3.313
+(speeds in km/s, min and max over the time window)
+
+Orbital elements
+Name                       NORAD  Epoch (UTC)             a [km]         e  i [deg]     RAAN     argp       M0
+--------------------------------------------------------------------------------------------------------------
+PULSAR-0                   64541  2026-11-10 04:10:34     6881.0 0.0004075   97.484   67.628   54.159  306.002
+GSAT0225 (GALILEO 29)      59598  2026-11-09 08:30:06    29600.3 0.0001590   55.219   97.023  171.210  226.893
+SES-5                      38652  2026-11-10 04:02:09    42164.3 0.0001910    0.051   32.201  188.006  254.676
+QZS-2 (MICHIBIKI-2)        42738  2026-10-17 15:21:52    42170.4 0.0745209   39.250  241.354  270.893  243.823

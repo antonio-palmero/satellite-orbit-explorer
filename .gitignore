@@ -1,0 +1,21 @@
+# Python / Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Input data (course workshop ZIP, not ours to redistribute)
+orbit_workshop_inputs*.zip
+satellite_orbits/input/
+
+# Intermediate run folder (the curated results live in outputs/)
+satellite_orbits/output/
+
+# Editors / OS
+.vscode/
+.DS_Store
+Thumbs.db
+
+satellite_orbits/
+*.docx
