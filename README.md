@@ -24,7 +24,8 @@ This notebook reads CelesTrak GP orbital elements (OMM JSON), propagates four sa
    rotation by Greenwich Mean Sidereal Time (IAU-1982) → spherical latitude, longitude and altitude → vis-viva speed.
 5. **Summarise** period, perigee, apogee, eccentricity, inclination and speed range.
 6. **Visualise** ground tracks over a coastline map and speed vs time.
-7. **Export** a 3D Earth-fixed KML, an animated KML for the Google Earth time slider, and a text report.
+7. **Export** a 3D Earth-fixed KML, an animated KML for the Google Earth time slider, a CZML file for CesiumJS,
+   a compact JSON (ECEF + ECI positions every 60 s) for a web 3D viewer, and a text report.
 
 Built-in sanity checks: GMST at J2000 ≈ 280.46°, Kepler residual < 1e-10, SES-5 stays between 4° and 6° E,
 Galileo period between 14.0 and 14.2 h.
@@ -56,6 +57,25 @@ satellites in view from anywhere on Earth, which is what a GNSS constellation ne
 **Speed.** Circular orbits keep an almost constant speed (≈ 7.5 km/s in LEO, ≈ 3.6 km/s in MEO, ≈ 3.07 km/s in GEO).
 QZS-2's speed changes along the orbit, faster at perigee and slower at apogee, as the vis-viva equation predicts.
 
+## Optional task: live CelesTrak data
+The course proposed an optional extension: replace the workshop snapshot with live data from CelesTrak.
+The cell right after Stage 2 does it:
+
+- Set `LIVE_GROUP = 'STARLINK'` (or any CelesTrak group) in Stage 1 and run all cells again.
+  With `LIVE_GROUP = None` (the default) the workshop snapshot is used.
+- The group is downloaded from `celestrak.org/NORAD/elements/gp.php?GROUP=...&FORMAT=JSON` and cached in
+  `satellite_orbits/input/gp_<GROUP>.json`. It is only downloaded again when the cache is older than 2 hours,
+  because CelesTrak asks users not to poll.
+- The first four records by NORAD ID replace the workshop satellites, and the report's source line records
+  the group and the retrieval time.
+
+### Adaptation: Galileo vs Starlink · Madrid's sky in real time
+I took this optional task further in a separate project,
+**[galileo-vs-starlink-madrid](https://github.com/antonio-palmero/galileo-vs-starlink-madrid)**. It downloads the
+`GALILEO` and `STARLINK` groups live, picks two satellites from each constellation's operational shell,
+propagates them with the same Kepler model over the 24 h starting *now*, and computes what an observer in
+Madrid sees: azimuth/elevation, a 10° mask, pass tables, an elevation plot and a skyplot.
+
 ## Assumptions & limitations
 - **Two-body model:** no J2 (nodal and perigee drift), no atmospheric drag (relevant for LEO), no Sun/Moon or solar radiation pressure.
 - **Mean elements:** GP data are SGP4 mean elements in the TEME frame; using them as osculating Keplerian elements is an approximation.
@@ -79,13 +99,16 @@ Put `orbit_workshop_inputs.zip` in the project folder, open the notebook and run
 `satellite_orbits/output/`.
 
 Open the `.kml` files in **Google Earth Pro** (*File → Open*); the animation plays with the time slider.
+Load `outputs/orbits.czml` in a CesiumJS viewer (`Cesium.CzmlDataSource.load('orbits.czml')`) to watch the
+satellites move in 3D, with one orbital period of path ahead and behind.
 
 ## Repository structure
 ```
 satellite-orbit-explorer/
-├── Satellite_Orbit_Explorer.ipynb   # the notebook (8 stages)
+├── Satellite_Orbit_Explorer.ipynb   # the notebook (8 stages + optional live-data cell)
+├── proyecto_orbitas.py              # the same code as a script with # %% cells (VS Code)
 ├── requirements.txt
-├── outputs/                         # plots, KML and report from a full run
+├── outputs/                         # plots, KML, CZML, web viewer JSON and report from a full run
 └── README.md
 ```
 
@@ -96,7 +119,8 @@ satellite-orbit-explorer/
 - Writing KML / gx:Track files to visualise orbits in Google Earth.
 
 ## Next steps
-- **Galileo visibility and DOP from Madrid:** elevation mask, satellites in view and PDOP over 24 h.
+- **Galileo visibility from Madrid:** done in [galileo-vs-starlink-madrid](https://github.com/antonio-palmero/galileo-vs-starlink-madrid)
+  (elevation mask, passes, skyplot). Still to do: satellites in view and PDOP for the whole Galileo constellation.
 - Validate against SGP4 and add J2 secular effects.
 
 ## Credits

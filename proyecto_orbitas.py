@@ -17,13 +17,13 @@
 # %%
 # --- Etapa 1: configuración ---
 # Convenios: todas las fechas son UTC (con zona horaria), distancias en km y velocidades en km/s.
-import json, math, time, zipfile
+import html, json, math, time, zipfile
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.colors import to_hex
+from matplotlib.colors import to_hex, to_rgba
 import requests
 
 # Constantes físicas
@@ -139,6 +139,57 @@ source_note = (f'CelesTrak GP data (OMM JSON), {len(sats)} satellites, '
 print(source_note)
 for s in sats:
     print(f"  {s['OBJECT_NAME']:<25} NORAD {s['NORAD_CAT_ID']:>6}   EPOCH {s['EPOCH']}")
+
+# %%
+# --- Ampliación opcional: datos en directo de CelesTrak ---
+# Con LIVE_GROUP = None (Etapa 1) se usa la instantánea del taller. Con un grupo
+# (por ejemplo 'STARLINK') se descargan sus datos GP actuales y se usan 4 satélites.
+if 'sats' not in globals():
+    raise NameError('sats is not defined: run the Stage 2 cell first.')
+
+LIVE_CACHE_HOURS = 2  # CelesTrak pide no consultar más a menudo: reutilizamos la caché
+
+if LIVE_GROUP is None:
+    print('LIVE_GROUP is None: using the workshop snapshot.')
+else:
+    cache_path = IN_DIR / f'gp_{LIVE_GROUP}.json'
+    now = datetime.now(timezone.utc)
+    cache_age_h = ((now.timestamp() - cache_path.stat().st_mtime) / 3600
+                   if cache_path.is_file() else None)
+
+    if cache_age_h is None or cache_age_h > LIVE_CACHE_HOURS:
+        # Usar los certificados del sistema operativo (necesario si un antivirus como Avast
+        # inspecciona HTTPS). Si truststore no está instalado (p. ej. en Colab), no hace nada.
+        try:
+            import truststore
+            truststore.inject_into_ssl()
+        except ImportError:
+            pass
+
+        # Descargar solo si no hay caché o tiene más de 2 horas
+        url = f'https://celestrak.org/NORAD/elements/gp.php?GROUP={LIVE_GROUP}&FORMAT=JSON'
+        print(f'Downloading {url}')
+        response = requests.get(url, timeout=30)
+        if not response.ok:                  # CelesTrak explica el motivo en el texto (p. ej. 403 por consultar demasiado)
+            print(f'CelesTrak answered {response.status_code}: {response.text.strip()[:300]}')
+        response.raise_for_status()          # error claro si la respuesta HTTP es un fallo
+        data = response.json()               # error claro si no es JSON (p. ej. grupo inexistente)
+        if not isinstance(data, list) or not data:
+            raise ValueError(f'CelesTrak returned no GP records for group {LIVE_GROUP!r}.')
+        cache_path.write_text(response.text, encoding='utf-8')  # solo se guarda si todo fue bien
+        retrieved = now
+    else:
+        print(f'Using cache {cache_path.name} ({cache_age_h:.1f} h old, limit {LIVE_CACHE_HOURS} h)')
+        retrieved = datetime.fromtimestamp(cache_path.stat().st_mtime, timezone.utc)
+
+    # Reutilizamos read_gp_json de la Etapa 2: comprueba los campos de cada registro
+    live = read_gp_json(cache_path)
+    sats = sorted(live, key=lambda rec: int(rec['NORAD_CAT_ID']))[:4]  # los 4 primeros por NORAD
+    source_note = (f'CelesTrak GP data (OMM JSON), group {LIVE_GROUP}, {len(sats)} of {len(live)} satellites, '
+                   f'retrieved (UTC) {retrieved:%Y-%m-%dT%H:%M:%SZ}')
+    print(source_note)
+    for s in sats:
+        print(f"  {s['OBJECT_NAME']:<25} NORAD {s['NORAD_CAT_ID']:>6}   EPOCH {s['EPOCH']}")
 
 # %% [markdown]
 # ## Etapa 3 · Convertir los elementos orbitales
@@ -494,8 +545,18 @@ plt.show()
 # ## Etapa 8 · KML e informe
 #
 # Exportamos dos archivos KML para Google Earth (las órbitas en 3D fijas a la
-# Tierra en rotación y una traza en tierra animada), escribimos un informe de
-# texto y comprimimos todos los resultados en un zip.
+# Tierra en rotación y una traza en tierra animada), un CZML para CesiumJS (los
+# satélites moviéndose en 3D con su órbita), escribimos un informe de texto y
+# comprimimos todos los resultados en un zip.
+#
+# **CZML** es JSON: un array de "paquetes". El primero (`id: "document"`) fija el
+# reloj de la escena; cada satélite es otro paquete con una posición muestreada
+# (`epoch` + `[t, lon, lat, alt_m, ...]`, t en segundos desde el epoch) que Cesium
+# interpola entre muestras. Cesium convierte cada muestra a ECEF cartesiano antes
+# de interpolar, así que aquí no hace falta partir las trazas en el salto de
+# longitud +180/-180 como en el KML. Ojo: Cesium lee lat/alt como geodésicas
+# sobre el elipsoide WGS84 y las nuestras son de una Tierra esférica, así que
+# cerca de los polos la posición puede desviarse unos 20 km (igual que en el KML).
 
 # %%
 # --- Etapa 8: exportar para Google Earth y escribir el informe ---
@@ -598,14 +659,238 @@ for idx, (el, pts) in enumerate(zip(elements, tracks)):
             sub(trk, f'{{{GX_NS}}}coord', f"{p['lon_deg']:.5f} {p['lat_deg']:.5f} 0")
 save_kml(root, OUT_DIR / 'orbit_animation.kml')
 
-# 3) Informe de texto
+# 3) CZML para CesiumJS
+CZML_STEP_S = 60   # una muestra de posición cada 60 s; Cesium interpola entre medias
+
+
+def czml_time(t):
+    """Fecha UTC -> texto ISO 8601 que entiende CZML."""
+    return f'{t:%Y-%m-%dT%H:%M:%SZ}'
+
+
+def czml_rgba(color):
+    """Color de Matplotlib -> [r, g, b, a] en 0..255. 'tab:blue' -> [31, 119, 180, 255]."""
+    return [round(c * 255) for c in to_rgba(color)]
+
+
+def czml_description(s):
+    """Tabla HTML con los datos de la órbita: Cesium la muestra en el InfoBox al hacer clic."""
+    rows = [('NORAD ID', f"{s['norad_id']}"),
+            ('Period', f"{s['period_h']:.3f} h"),
+            ('Perigee altitude', f"{s['perigee_km']:.1f} km"),
+            ('Apogee altitude', f"{s['apogee_km']:.1f} km"),
+            ('Eccentricity (e)', f"{s['e']:.7f}"),
+            ('Inclination (i)', f"{s['i_deg']:.3f}&deg;")]
+    body = ''.join(f'<tr><th style="text-align:left">{k}</th><td>{v}</td></tr>' for k, v in rows)
+    return (f"<h3>{html.escape(s['name'])}</h3><table>{body}</table>"
+            '<p><i>Two-body Kepler model from SGP4 mean elements (educational approximation).</i></p>')
+
+
+def export_czml(path, step_s=CZML_STEP_S):
+    """Escribe un CZML con el reloj de la ventana y un paquete por satélite (mismos colores que las figuras)."""
+    if step_s % STEP_SECONDS:
+        raise ValueError(f'step_s ({step_s} s) must be a multiple of STEP_SECONDS ({STEP_SECONDS} s).')
+    every = step_s // STEP_SECONDS
+    interval = f'{czml_time(start)}/{czml_time(end)}'   # la misma ventana de la Etapa 4
+
+    # Paquete "document": siempre el primero; fija el reloj de la escena
+    czml = [{
+        'id': 'document',
+        'name': 'Satellite Orbit Explorer',
+        'version': '1.0',
+        'clock': {
+            'interval': interval,
+            'currentTime': czml_time(start),
+            'multiplier': 300,                  # 300 s simulados por segundo real: 24 h en ~4,8 min
+            'range': 'LOOP_STOP',               # al llegar al final, vuelve a empezar
+            'step': 'SYSTEM_CLOCK_MULTIPLIER',  # avanza según el reloj real x multiplier
+        },
+    }]
+
+    for el, pts, s, color in zip(elements, tracks, summaries, COLORS):
+        samples = pts[::every]
+        if samples[-1] is not pts[-1]:        # que la última muestra sea siempre el final de la ventana
+            samples.append(pts[-1])
+        coords = []                           # [t, lon, lat, alt_m, t, lon, lat, alt_m, ...]
+        for p in samples:
+            coords += [int((p['time'] - start).total_seconds()),
+                       round(p['lon_deg'], 6), round(p['lat_deg'], 6),   # primero lon, luego lat
+                       round(p['alt_km'] * 1000, 1)]                     # altura en METROS
+        rgba = czml_rgba(color)
+        period_s = round(s['period_h'] * 3600, 1)
+        czml.append({
+            'id': f"sat-{el['norad_id']}",
+            'name': el['label'],
+            'availability': interval,         # fuera de la ventana no se dibuja (nada de extrapolar)
+            'description': czml_description(s),
+            'position': {
+                'epoch': czml_time(start),
+                'interpolationAlgorithm': 'LAGRANGE',
+                'interpolationDegree': 5,     # polinomio por 6 muestras vecinas
+                'cartographicDegrees': coords,
+            },
+            'point': {
+                'pixelSize': 8,
+                'color': {'rgba': rgba},
+                'outlineColor': {'rgba': [255, 255, 255, 255]},
+                'outlineWidth': 1,
+            },
+            'label': {
+                'text': el['name'],
+                'font': '13px sans-serif',
+                'fillColor': {'rgba': rgba},
+                'outlineColor': {'rgba': [0, 0, 0, 255]},
+                'outlineWidth': 2,
+                'style': 'FILL_AND_OUTLINE',  # contorno negro: se lee sobre cualquier fondo
+                'horizontalOrigin': 'LEFT',
+                'pixelOffset': {'cartesian2': [10, 0]},
+            },
+            'path': {
+                'leadTime': period_s,         # una vuelta por delante...
+                'trailTime': period_s,        # ...y una por detrás
+                'resolution': step_s,
+                'width': 2,
+                'material': {'solidColor': {'color': {'rgba': rgba}}},
+            },
+        })
+
+    path.write_text(json.dumps(czml, separators=(',', ':')), encoding='utf-8')  # compacto
+    n_samples = len(czml[1]['position']['cartographicDegrees']) // 4
+    print(f'Saved {path} ({len(czml) - 1} satellites, {n_samples} samples each, every {step_s} s)')
+
+
+export_czml(OUT_DIR / 'orbits.czml')
+
+# 4) JSON para el visor 3D web (posiciones en ECEF y en ECI)
+WEB_STEP_S = 60   # una posición cada 60 s, como el CZML
+MODEL_NOTE = ('Two-body Kepler orbit from SGP4 mean elements, spherical Earth, '
+              'simple Greenwich rotation - an educational approximation.')
+SIDEREAL_DAY_H = 23.9345
+
+
+def orbit_regime(s):
+    """Régimen orbital a partir del periodo, la inclinación y la excentricidad."""
+    if s['period_h'] < 2.5:                          # < ~2000 km de altura
+        return 'LEO'
+    if abs(s['period_h'] - SIDEREAL_DAY_H) < 0.1:   # geosíncrono: una vuelta por día sidéreo
+        return 'GEO' if s['i_deg'] < 5 and s['e'] < 0.01 else 'IGSO'
+    return 'MEO'
+
+
+def ecef_from_spherical(lat_deg, lon_deg, alt_km):
+    """(lat, lon, alt) sobre la Tierra esférica -> (x, y, z) ECEF en km. Inversa del paso 6 de propagate."""
+    r = EARTH_RADIUS_KM + alt_km
+    lat, lon = math.radians(lat_deg), math.radians(lon_deg)
+    return (r * math.cos(lat) * math.cos(lon),
+            r * math.cos(lat) * math.sin(lon),
+            r * math.sin(lat))
+
+
+def eci_from_ecef(xf, yf, zf, t):
+    """ECEF -> ECI girando +GMST alrededor de z: la inversa (traspuesta) de la rotación del paso 5.
+    Sin precesión ni nutación, así que es un marco pseudo-inercial "de fecha", no ICRF exacto."""
+    theta = gmst_rad(t)
+    c, s = math.cos(theta), math.sin(theta)
+    return (c * xf - s * yf,
+            s * xf + c * yf,
+            zf)
+
+
+def export_web_json(path, step_s=WEB_STEP_S):
+    """Escribe un JSON compacto para un visor 3D web: metadatos + un bloque por satélite con
+    sus datos de órbita y sus posiciones cada step_s segundos en ECEF y en ECI (km, 1 decimal)."""
+    if step_s % STEP_SECONDS:
+        raise ValueError(f'step_s ({step_s} s) must be a multiple of STEP_SECONDS ({STEP_SECONDS} s).')
+    every = step_s // STEP_SECONDS
+
+    satellites = []
+    for pts, s, color in zip(tracks, summaries, COLORS):
+        samples = pts[::every]
+        if samples[-1] is not pts[-1]:   # que la última muestra sea siempre el final de la ventana
+            samples.append(pts[-1])
+
+        ecef, eci = [], []
+        for p in samples:
+            xyz_f = ecef_from_spherical(p['lat_deg'], p['lon_deg'], p['alt_km'])
+            xyz_i = eci_from_ecef(*xyz_f, p['time'])
+            # Comprobación: una rotación conserva el radio (sin redondear, error numérico ~1e-9 km)
+            assert abs(math.hypot(*xyz_i) - math.hypot(*xyz_f)) < 1e-6, f"{s['name']}: radius changed in ECI"
+            ecef.append([round(v, 1) for v in xyz_f])
+            eci.append([round(v, 1) for v in xyz_i])
+
+        satellites.append({
+            'name': s['name'],
+            'norad_id': s['norad_id'],
+            'regime': orbit_regime(s),
+            'color': to_hex(color),          # 'tab:blue' -> '#1f77b4', el mismo que en las gráficas
+            'period_h': round(s['period_h'], 4),
+            'perigee_km': round(s['perigee_km'], 1),
+            'apogee_km': round(s['apogee_km'], 1),
+            'i_deg': round(s['i_deg'], 3),
+            'e': round(s['e'], 7),
+            'ecef': ecef,
+            'eci': eci,
+        })
+
+    data = {
+        'start_utc': f'{start:%Y-%m-%dT%H:%M:%SZ}',
+        'step_s': step_s,
+        'n_points': len(satellites[0]['ecef']),
+        'units': 'km',
+        'earth_radius_km': EARTH_RADIUS_KM,
+        'frames': {
+            'ecef': 'Earth-fixed, spherical Earth (x to 0 deg lon, z to North pole)',
+            'eci': 'ECEF rotated by +GMST (IAU-1982); pseudo-inertial of date, no precession/nutation',
+        },
+        'source': source_note,
+        'model_note': MODEL_NOTE,
+        'satellites': satellites,
+    }
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, separators=(',', ':'))   # compacto
+    path.write_text(text, encoding='utf-8')
+    print(f"Saved {path} ({len(satellites)} satellites, {data['n_points']} points each, "
+          f"every {step_s} s, {path.stat().st_size / 1024:.0f} KB)")
+
+    # Los mismos datos como script (.js): una web los carga con <script src=...>, que funciona
+    # incluso abriendo el HTML con doble clic (file://), donde fetch() de un .json está bloqueado
+    js_path = path.with_suffix('.js')
+    js_path.write_text(f'window.ORBITS_WEB_DATA = {text};\n', encoding='utf-8')
+    print(f'Saved {js_path} (same data as a script for the web viewer)')
+    return data
+
+
+web_data = export_web_json(PROJECT_DIR / 'outputs' / 'orbits_web.json')
+
+# Comprobaciones del JSON (sobre los valores ya redondeados a 0,1 km)
+for sat in web_data['satellites']:
+    radius_diff = max(abs(math.hypot(*pi) - math.hypot(*pf)) for pi, pf in zip(sat['eci'], sat['ecef']))
+    assert radius_diff < 0.2, f"{sat['name']}: ECI and ECEF radii differ by {radius_diff:.3f} km"
+    print(f"Check passed: {sat['name']} ECI radius = ECEF radius (max diff {radius_diff:.3f} km, rounding only).")
+
+    if sat['norad_id'] == 38652:   # SES-5 es geoestacionario: casi quieto en ECEF, un círculo entero en ECI
+        def max_drift(points):
+            x0, y0, z0 = points[0]
+            return max(math.dist((x0, y0, z0), p) for p in points)
+        drift_ecef, drift_eci = max_drift(sat['ecef']), max_drift(sat['eci'])
+        assert drift_ecef < 500, f'SES-5 moves {drift_ecef:.0f} km in ECEF: it should be almost fixed'
+        assert drift_eci > 80000, f'SES-5 moves only {drift_eci:.0f} km in ECI: it should circle the Earth'
+        print(f'Check passed: SES-5 moves at most {drift_ecef:.1f} km in ECEF '
+              f'but {drift_eci:,.0f} km in ECI (a full GEO circle).')
+
+    # Régimen esperado de los satélites del taller (con datos en directo no hay valor conocido: se omite)
+    expected = {64541: 'LEO', 59598: 'MEO', 38652: 'GEO', 42738: 'IGSO'}.get(sat['norad_id'])
+    assert expected is None or sat['regime'] == expected, \
+        f"{sat['name']}: unexpected regime {sat['regime']} (expected {expected})"
+
+# 5) Informe de texto
 report_lines = [
     'Satellite Orbit Report - built during Space Career Week 2026, GNSS Academy',
     '',
     source_note,
     f'Window (UTC): {start:%Y-%m-%d %H:%M:%S} -> {end:%Y-%m-%d %H:%M:%S}, step {STEP_SECONDS} s, {n_points} points',
-    'Model: two-body Kepler orbit from SGP4 mean elements, spherical Earth, '
-    'simple Greenwich rotation - an educational approximation.',
+    f'Model: {MODEL_NOTE}',
     '',
     'Orbit summary',
     *summary_table(summaries),
@@ -617,9 +902,9 @@ report_path = OUT_DIR / 'orbit_report.txt'
 report_path.write_text('\n'.join(report_lines) + '\n', encoding='utf-8')
 print(f'Saved {report_path}')
 
-# Comprimir los cinco resultados en un zip
+# Comprimir los seis resultados en un zip
 OUTPUT_FILES = ['ground_tracks.png', 'velocity_timeseries.png',
-                'orbit_tracks_ecef.kml', 'orbit_animation.kml', 'orbit_report.txt']
+                'orbit_tracks_ecef.kml', 'orbit_animation.kml', 'orbits.czml', 'orbit_report.txt']
 missing = [name for name in OUTPUT_FILES if not (OUT_DIR / name).is_file()]
 if missing:
     raise FileNotFoundError(f'Missing outputs (run the earlier cells): {missing}')
@@ -647,7 +932,8 @@ except ImportError:  # fuera de Colab: el zip ya está en tu disco
 # - [ ] La Etapa 5 pasa las comprobaciones de GMST, Kepler y SES-5
 # - [ ] La Etapa 6 muestra el resumen y pasa la comprobación del periodo de Galileo
 # - [ ] La Etapa 7 muestra y guarda las dos figuras
-# - [ ] La Etapa 8 guarda los 2 KML, el informe y el zip, y lo descarga
+# - [ ] La Etapa 8 guarda los 2 KML, el CZML, el informe y el zip, y lo descarga
+# - [ ] La Etapa 8 guarda `outputs/orbits_web.json` y pasa las comprobaciones de radio ECI/ECEF y de SES-5
 #
 # **Abrir los KML en Google Earth Pro:** Archivo > Abrir y elige un archivo `.kml`
 # (o arrástralo sobre el globo). `orbit_tracks_ecef.kml` muestra las órbitas en 3D
@@ -657,3 +943,9 @@ except ImportError:  # fuera de Colab: el zip ya está en tu disco
 # de la llave inglesa) para cambiar la velocidad o mostrar toda la traza hasta el
 # instante actual. Ojo: la versión web de Google Earth no admite `gx:MultiTrack`,
 # así que la animación solo funciona en Google Earth Pro.
+#
+# **Abrir el CZML en CesiumJS:** en tu propia página, o en el ejemplo "CZML" de
+# Cesium Sandcastle, carga el archivo con
+# `viewer.dataSources.add(Cesium.CzmlDataSource.load('orbits.czml'))`. El reloj
+# arranca al inicio de la ventana a x300; haz clic en un satélite para ver su
+# ficha (NORAD, periodo, perigeo/apogeo, e, i) en el InfoBox.
