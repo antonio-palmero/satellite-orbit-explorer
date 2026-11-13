@@ -126,4 +126,4 @@ satellite-orbit-explorer/
 ## Credits
 Workshop by **GNSS Academy**, Space Career Week 2026 (#SCW26). Orbital data from [CelesTrak](https://celestrak.org).
 
-**Author:** Antonio Rodríguez-Palmero Tajuelo, Telecommunications Engineering student at ETSIT-UPM · [LinkedIn](TU-LINKEDIN)
+**Author:** Antonio Rodríguez-Palmero Tajuelo, Telecommunications Engineering student at ETSIT-UPM · [LinkedIn](https://www.linkedin.com/in/antonio-rodr%C3%ADguez-palmero-tajuelo-6416802aa/)
